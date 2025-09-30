@@ -832,6 +832,10 @@ struct FeatureFlags {
     // If true generate layouts for dynamic fields
     #[serde(skip_serializing_if = "is_false")]
     generate_df_type_layouts: bool,
+
+    // Enables account aliases.
+    #[serde(skip_serializing_if = "is_false")]
+    account_aliases: bool,
 }
 
 fn is_false(b: &bool) -> bool {
@@ -2264,6 +2268,21 @@ impl ProtocolConfig {
 
     pub fn generate_df_type_layouts(&self) -> bool {
         self.feature_flags.generate_df_type_layouts
+    }
+
+    pub fn account_aliases(&self) -> bool {
+        let account_aliases = self.feature_flags.account_aliases;
+        assert!(
+            !account_aliases || self.mysticeti_fastpath(),
+            "Account aliases requires Mysticeti fastpath to be enabled"
+        );
+        if account_aliases {
+            // TODO: when flag for disabling CertifiedTransaction is added, add assertion for it here.
+            unimplemented!(
+                "account_aliases depends on disabling CertifiedTransaction, which is not yet implemented"
+            );
+        }
+        account_aliases
     }
 }
 
