@@ -1,16 +1,16 @@
 // Copyright (c) Mysten Labs, Inc.
 // SPDX-License-Identifier: Apache-2.0
 
-use std::sync::Arc;
+use std::{collections::BTreeSet, sync::Arc};
 
 use crate::execution_scheduler::balance_withdraw_scheduler::{
     balance_read::AccountBalanceRead, eager_scheduler::EagerBalanceWithdrawScheduler,
     naive_scheduler::NaiveBalanceWithdrawScheduler, BalanceSettlement, ScheduleResult,
-    TxBalanceWithdraw,
+    ScheduleStatus, TxBalanceWithdraw,
 };
 use futures::stream::FuturesUnordered;
 use mysten_metrics::monitored_mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
-use sui_types::base_types::SequenceNumber;
+use sui_types::{accumulator_root::AccumulatorObjId, base_types::SequenceNumber};
 use tokio::sync::oneshot;
 use tracing::debug;
 
@@ -54,6 +54,27 @@ impl WithdrawReservations {
             },
             receivers,
         )
+    }
+
+    pub fn notify_already_settled(self) {
+        debug!(
+            "Withdraws at accumulator version {:?} are already settled",
+            self.accumulator_version
+        );
+        for (withdraw, sender) in self.withdraws.into_iter().zip(self.senders) {
+            let _ = sender.send(ScheduleResult {
+                tx_digest: withdraw.tx_digest,
+                status: ScheduleStatus::AlreadySettled,
+            });
+        }
+    }
+
+    pub fn all_accounts(&self) -> BTreeSet<AccumulatorObjId> {
+        self.withdraws
+            .iter()
+            .flat_map(|withdraw| withdraw.reservations.keys())
+            .cloned()
+            .collect::<BTreeSet<_>>()
     }
 }
 

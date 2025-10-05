@@ -102,7 +102,7 @@ impl TestScheduler {
             .map(|(id, value)| (AccumulatorObjId::new_unchecked(*id), *value))
             .collect();
         self.mock_read
-            .settle_balance_changes(accumulator_changes.clone());
+            .settle_balance_changes(accumulator_changes.clone(), next_accumulator_version);
         self.schedulers.values().for_each(|scheduler| {
             scheduler.settle_balances(BalanceSettlement {
                 next_accumulator_version,
@@ -160,17 +160,7 @@ async fn test_schedules_and_settles() {
         tx_digest: TransactionDigest::random(),
         reservations: BTreeMap::from([(AccumulatorObjId::new_unchecked(account), 60)]),
     };
-    let withdraw1 = TxBalanceWithdraw {
-        tx_digest: TransactionDigest::random(),
-        reservations: BTreeMap::from([(AccumulatorObjId::new_unchecked(account), 60)]),
-    };
-    let withdraw2 = TxBalanceWithdraw {
-        tx_digest: TransactionDigest::random(),
-        reservations: BTreeMap::from([(AccumulatorObjId::new_unchecked(account), 60)]),
-    };
-
     let receivers = test.schedule_withdraws(v0, vec![withdraw0.clone()]);
-
     wait_for_results(
         receivers,
         BTreeMap::from([(withdraw0.tx_digest, ScheduleStatus::SufficientBalance)]),
@@ -178,11 +168,14 @@ async fn test_schedules_and_settles() {
     .await;
 
     let v1 = v0.next();
-    let receivers = test.schedule_withdraws(v1, vec![withdraw1.clone()]);
-
     // 100 -> 40, v0 -> v1
     test.settle_balance_changes(v1, BTreeMap::from([(account, -60)]));
 
+    let withdraw1 = TxBalanceWithdraw {
+        tx_digest: TransactionDigest::random(),
+        reservations: BTreeMap::from([(AccumulatorObjId::new_unchecked(account), 60)]),
+    };
+    let receivers = test.schedule_withdraws(v1, vec![withdraw1.clone()]);
     wait_for_results(
         receivers,
         BTreeMap::from([(withdraw1.tx_digest, ScheduleStatus::InsufficientBalance)]),
@@ -190,11 +183,14 @@ async fn test_schedules_and_settles() {
     .await;
 
     let v2 = v1.next();
-    let receivers = test.schedule_withdraws(v2, vec![withdraw2.clone()]);
-
     // 40 -> 60, v1 -> v2
     test.settle_balance_changes(v2, BTreeMap::from([(account, 20)]));
 
+    let withdraw2 = TxBalanceWithdraw {
+        tx_digest: TransactionDigest::random(),
+        reservations: BTreeMap::from([(AccumulatorObjId::new_unchecked(account), 60)]),
+    };
+    let receivers = test.schedule_withdraws(v2, vec![withdraw2.clone()]);
     wait_for_results(
         receivers,
         BTreeMap::from([(withdraw2.tx_digest, ScheduleStatus::SufficientBalance)]),
