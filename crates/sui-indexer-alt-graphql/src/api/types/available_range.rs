@@ -78,6 +78,31 @@ impl AvailableRange {
     }
 }
 
+macro_rules! pipeline_match {
+    ($arg:expr, $(($type_:literal, ($($field:literal)|+), $filters:ident, $action:block)),* $(,)?) => {
+        #[cfg(test)]
+        {
+            fn is_in_registry(type_: &str, field: &str) -> bool {
+                use crate::schema;
+                let schema = schema().finish();
+                let registry = schema.names();
+                registry.contains(&type_.to_string()) && (registry.contains(&field.to_string()) || field.is_empty())
+            }
+            $(
+                $(
+                    assert!(is_in_registry($type_, $field));
+                )*
+            )*
+        }
+        match ($arg) {
+            $(
+                ($type_, Some($($field)|+), $filters) => $action
+            ),*
+            (_, _, _) => (),
+        }
+    }
+}
+
 /// Maps GraphQL query components to watermark pipeline names.
 ///
 /// Determines which watermark pipelines are relevant for a given GraphQL query.
@@ -90,121 +115,134 @@ fn collect_pipelines(
     filters: BTreeSet<String>,
     pipelines: &mut BTreeSet<String>,
 ) {
-    match (type_, field, filters) {
-        // Address fields
-        ("Address", Some("asObject"), filters) => {
+    pipeline_match!(
+        (type_, field, filters),
+        ("Address", ("asObject"), filters, {
             collect_pipelines("IObject", Some("objectAt"), filters, pipelines);
-        }
-        ("Address", Some("transactions"), mut filters) => {
+        }),
+        ("Address", ("transactions"), filters, {
+            let mut filters = filters;
             filters.insert("affectedAddress".to_string());
             collect_pipelines("Query", Some("transactions"), filters, pipelines);
-        }
+        }),
         (
             "Address",
-            field @ Some("balance" | "balances" | "multiGetBalances" | "objects"),
+            ("balance" | "balances" | "multiGetBalances" | "objects"),
             filters,
-        ) => {
-            collect_pipelines("IAddressable", field, filters, pipelines);
-        }
+            {
+                collect_pipelines("IAddressable", field, filters, pipelines);
+            }
+        ),
         // Address has `dynamicFields` to allow for fetching fields on wrapped objects. But we do not want
         // to add `dynamicFields` to `IAddressable`, because that would incorrectly require MovePackage
         // to offer it.
         (
             "Address",
-            field @ Some(
-                "dynamicField"
+            ("dynamicField"
                 | "dynamicFields"
                 | "dynamicObjectField"
                 | "multiGetDynamicFields"
-                | "multiGetDynamicObjectFields",
-            ),
+                | "multiGetDynamicObjectFields"),
             filters,
-        ) => {
-            collect_pipelines("IMoveObject", field, filters, pipelines);
-        }
-
-        // Checkpoint fields
-        ("Checkpoint", Some("transactions"), mut filters) => {
+            {
+                collect_pipelines("IMoveObject", field, filters, pipelines);
+            }
+        ),
+        ("Checkpoint", ("transactions"), filters, {
+            let mut filters = filters;
             filters.insert("atCheckpoint".to_string());
             collect_pipelines("Query", Some("transactions"), filters, pipelines);
-        }
-
-        // CoinMetadata fields
-        ("CoinMetadata", filter @ Some("balance" | "balances" | "multiGetBalances"), filters) => {
-            collect_pipelines("IAddressable", filter, filters, pipelines);
-        }
-        ("CoinMetadata", Some("dynamicFields"), filters) => {
-            collect_pipelines("IMoveObject", Some("dynamicFields"), filters, pipelines);
-        }
-        ("CoinMetadata", filter @ Some("objects" | "receivedTransactions"), filters) => {
-            collect_pipelines("IObject", filter, filters, pipelines);
-        }
+        }),
         (
             "CoinMetadata",
-            field @ Some("objectAt" | "objectVersionsAfter" | "objectVersionsBefore"),
+            ("balance" | "balances" | "multiGetBalances"),
             filters,
-        ) => {
-            collect_pipelines("IObject", field, filters, pipelines);
-        }
-
-        ("CoinMetadata", Some("supply"), _) => {
+            {
+                collect_pipelines("IAddressable", field, filters, pipelines);
+            }
+        ),
+        ("CoinMetadata", ("dynamicFields"), filters, {
+            collect_pipelines("IMoveObject", field, filters, pipelines);
+        }),
+        (
+            "CoinMetadata",
+            ("objects" | "receivedTransactions"),
+            filters,
+            {
+                collect_pipelines("IObject", field, filters, pipelines);
+            }
+        ),
+        (
+            "CoinMetadata",
+            ("objectAt" | "objectVersionsAfter" | "objectVersionsBefore"),
+            filters,
+            {
+                collect_pipelines("IObject", field, filters, pipelines);
+            }
+        ),
+        ("CoinMetadata", ("supply"), _filters, {
             pipelines.insert("consistent".to_string());
-        }
-
-        // Epoch fields
-        ("Epoch", Some("checkpoints"), filters) => {
+        }),
+        ("Epoch", ("checkpoints"), filters, {
             collect_pipelines("Query", Some("checkpoints"), filters, pipelines);
-        }
-        ("Epoch", Some("coinDenyList"), _) => {
+        }),
+        ("Epoch", ("coinDenyList"), _filters, {
             pipelines.insert("obj_versions".to_string());
-        }
-
-        // Event fields
-        ("Event", _, filters) => {
-            collect_pipelines("Query", Some("events"), filters, pipelines);
-        }
-
-        // IAddressable fields
-        ("IAddressable", Some("balance" | "balances" | "multiGetBalances" | "objects"), _) => {
-            pipelines.insert("consistent".to_string());
-        }
-        ("IAddressable", Some("defaultSuinsName"), _) => {
+        }),
+        (
+            "Event",
+            ("contents"
+                | "eventBcs"
+                | "sender"
+                | "sequenceNumber"
+                | "timestamp"
+                | "transaction"
+                | "transactionModule"),
+            filters,
+            {
+                collect_pipelines("Query", Some("events"), filters, pipelines);
+            }
+        ),
+        (
+            "IAddressable",
+            ("balance" | "balances" | "multiGetBalances" | "objects"),
+            _filters,
+            {
+                pipelines.insert("consistent".to_string());
+            }
+        ),
+        ("IAddressable", ("defaultSuinsName"), _filters, {
             pipelines.insert("obj_versions".to_string());
-        }
-
-        // IMoveObject fields
-        ("IMoveObject", Some("dynamicFields"), _) => {
+        }),
+        ("IMoveObject", ("dynamicFields"), _filters, {
             pipelines.insert("consistent".to_string());
-        }
+        }),
         (
             "IMoveObject",
-            Some(
-                "contents"
+            ("contents"
                 | "dynamicField"
                 | "hasPublicTransfer"
                 | "dynamicObjectField"
                 | "objectVersionsBefore"
                 | "moveObjectBcs"
                 | "multiGetDynamicFields"
-                | "multiGetDynamicObjectFields",
-            ),
-            _,
-        ) => {
-            pipelines.insert("obj_versions".to_string());
-        }
-
-        // IObject fields
-        ("IObject", Some("objects"), _) => {
+                | "multiGetDynamicObjectFields"),
+            _filters,
+            {
+                pipelines.insert("obj_versions".to_string());
+            }
+        ),
+        ("IObject", ("objects"), _filters, {
             pipelines.insert("consistent".to_string());
-        }
-        ("IObject", Some("receivedTransactions"), mut filters) => {
+        }),
+        ("IObject", ("receivedTransactions"), filters, {
+            let mut filters = filters;
             filters.insert("affectedAddress".to_string());
             collect_pipelines("Query", Some("transactions"), filters, pipelines);
-        }
+        }),
         (
             "IObject",
-            Some(
-                "digest"
+            ("digest"
                 | "objectAt"
                 | "objectBcs"
                 | "objectVersionsAfter"
@@ -212,38 +250,42 @@ fn collect_pipelines(
                 | "owner"
                 | "previousTransaction"
                 | "storageRebate"
-                | "version",
-            ),
-            _,
-        ) => {
-            pipelines.insert("obj_versions".to_string());
-        }
-        // Object fields
+                | "version"),
+            _filters,
+            {
+                pipelines.insert("obj_versions".to_string());
+            }
+        ),
         (
             "Object",
-            field @ Some(
-                "address" | "balance" | "balances" | "defaultSuinsName" | "multiGetBalances"
-                | "objects",
-            ),
+            ("address"
+                | "balance"
+                | "balances"
+                | "defaultSuinsName"
+                | "multiGetBalances"
+                | "objects"),
             filters,
-        ) => collect_pipelines("IAddressable", field, filters, pipelines),
+            {
+                collect_pipelines("IAddressable", field, filters, pipelines);
+            }
+        ),
         (
             "Object",
-            field @ Some(
-                "asMoveObject"
+            ("asMoveObject"
                 | "asMovePackage"
                 | "dynamicField"
                 | "dynamicFields"
                 | "dynamicObjectField"
                 | "multiGetDynamicFields"
-                | "multiGetDynamicObjectFields",
-            ),
+                | "multiGetDynamicObjectFields"),
             filters,
-        ) => collect_pipelines("IMoveObject", field, filters, pipelines),
+            {
+                collect_pipelines("IMoveObject", field, filters, pipelines);
+            }
+        ),
         (
             "Object",
-            field @ Some(
-                "digest"
+            ("digest"
                 | "objectAt"
                 | "objectBcs"
                 | "objectVersionsAfter"
@@ -251,19 +293,23 @@ fn collect_pipelines(
                 | "owner"
                 | "previousTransaction"
                 | "storageRebate"
-                | "version",
-            ),
+                | "version"),
             filters,
-        ) => collect_pipelines("IObject", field, filters, pipelines),
-
-        // MovePackage fields
-        ("MovePackage", field @ Some("balance" | "balances" | "multiGetBalances"), filters) => {
-            collect_pipelines("IAddressable", field, filters, pipelines);
-        }
+            {
+                collect_pipelines("IObject", field, filters, pipelines);
+            }
+        ),
         (
             "MovePackage",
-            field @ Some(
-                "digest"
+            ("balance" | "balances" | "multiGetBalances"),
+            filters,
+            {
+                collect_pipelines("IAddressable", field, filters, pipelines);
+            }
+        ),
+        (
+            "MovePackage",
+            ("digest"
                 | "objectAt"
                 | "objectBcs"
                 | "objectVersionsAfter"
@@ -271,38 +317,36 @@ fn collect_pipelines(
                 | "owner"
                 | "receivedTransactions"
                 | "storageRebate"
-                | "version",
-            ),
+                | "version"),
             filters,
-        ) => {
-            collect_pipelines("IObject", field, filters, pipelines);
-        }
-
-        // Query fields
-        ("Query", Some("checkpoints"), _) => {
+            {
+                collect_pipelines("IObject", field, filters, pipelines);
+            }
+        ),
+        ("Query", ("checkpoints"), _filters, {
             pipelines.insert("cp_sequence_numbers".to_string());
-        }
-        ("Query", Some("coinMetadata"), _) => {
+        }),
+        ("Query", ("coinMetadata"), _filters, {
             pipelines.insert("consistent".to_string());
-        }
-        ("Query", Some("events"), filters) => {
+        }),
+        ("Query", ("events"), filters, {
             pipelines.insert("tx_digests".to_string());
             if filters.contains("module") {
                 pipelines.insert("ev_emit_mod".to_string());
             } else {
                 pipelines.insert("ev_struct_inst".to_string());
             }
-        }
-        ("Query", Some("object"), _) => {
+        }),
+        ("Query", ("object"), _filters, {
             pipelines.insert("obj_versions".to_string());
-        }
-        ("Query", Some("objects"), _) => {
+        }),
+        ("Query", ("objects"), _filters, {
             pipelines.insert("consistent".to_string());
-        }
-        ("Query", Some("objectVersions"), _) => {
+        }),
+        ("Query", ("objectVersions"), _filters, {
             pipelines.insert("obj_versions".to_string());
-        }
-        ("Query", Some("transactions"), filters) => {
+        }),
+        ("Query", ("transactions"), filters, {
             pipelines.insert("tx_digests".to_string());
             pipelines.insert("cp_sequence_numbers".to_string());
 
@@ -317,13 +361,12 @@ fn collect_pipelines(
             } else if filters.contains("sentAddress") {
                 pipelines.insert("tx_affected_addresses".to_string());
             }
-        }
-        ("TransactionEffects", Some("balanceChanges"), _) => {
+        }),
+        ("TransactionEffects", ("balanceChanges"), _filters, {
             pipelines.insert("tx_balance_changes".to_string());
             pipelines.insert("tx_digests".to_string());
-        }
-        (_, _, _) => (),
-    }
+        }),
+    );
 }
 
 #[cfg(test)]
@@ -339,6 +382,12 @@ mod tests {
         let mut pipelines = BTreeSet::new();
         collect_pipelines(type_, field, filters, &mut pipelines);
         pipelines
+    }
+
+    #[test]
+    fn test_address_as_object() {
+        let result = test_collect_pipelines("Address", Some("asObject"), BTreeSet::new());
+        assert!(result.contains("obj_versions"));
     }
 
     #[test]
