@@ -35,6 +35,7 @@ pub fn execute<Mode: ExecutionMode>(
     gas_charger: &mut GasCharger,
     txn: ProgrammableTransaction,
     trace_builder_opt: &mut Option<MoveTraceBuilder>,
+    address_balance_enabled: bool,
 ) -> ResultWithTimings<Mode::ExecutionResults, ExecutionError> {
     let package_store = CachedPackageStore::new(Box::new(package_store));
     let linkage_analysis = linkage::analysis::linkage_analysis_for_protocol_config::<Mode>(
@@ -50,6 +51,7 @@ pub fn execute<Mode: ExecutionMode>(
         state_view,
         &package_store,
         linkage_analysis.as_ref(),
+        address_balance_enabled,
     );
     let txn = loading::translate::transaction(&env, txn).map_err(|e| (e, vec![]))?;
     let txn = typing::translate_and_verify::<Mode>(&env, txn).map_err(|e| (e, vec![]))?;
