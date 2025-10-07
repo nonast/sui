@@ -115,14 +115,10 @@ pub(super) fn processor<P: Processor + Send + Sync + 'static>(
                         .with_label_values(&[P::NAME])
                         .inc_by(values.len() as u64);
 
+                    // Skip processing checkpoints below the main reader lo.
                     if let Some(main_reader_lo) = main_reader_lo {
                         let current_reader_lo = main_reader_lo.load(Ordering::Relaxed);
                         if cp_sequence_number < current_reader_lo {
-                            tracing::warn!(
-                                "checkpoint {} is less than main reader lo {}",
-                                cp_sequence_number,
-                                current_reader_lo
-                            );
                             return Ok(());
                         }
                     }
