@@ -28,6 +28,9 @@ pub(crate) mod map;
 /// Name of the column family the database adds, to manage the checkpoint watermark.
 const WATERMARK_CF: &str = "$watermark";
 
+/// Name of the column family the database adds, to track restoration progress.
+const RESTORE_CF: &str = "$restore";
+
 /// A wrapper around RocksDB that provides arbitrary writes and snapshot-based reads (reads must
 /// specify the checkpoint they want to read from). Keys and values are encoded (using Bincode and
 /// BCS respectively) to provide a type-safe API.
@@ -75,6 +78,15 @@ pub(crate) struct Watermark {
     pub timestamp_ms_hi_inclusive: u64,
 }
 
+/// Identifier for a particular shard of the live object set that a pipeline has successfully
+/// restored from.
+#[derive(Encode, PartialEq, Eq)]
+pub(crate) struct Restored<'p> {
+    pipeline: &'p str,
+    bucket: u32,
+    partition: u32,
+}
+
 /// Database internals in a self-referential struct that owns the database as well as handles from
 /// that databases (for column families and snapshots). This data structure is not inherently
 /// thread-safe, but access to it is protected by [`Db`]'s API.
@@ -90,6 +102,11 @@ struct Inner {
     #[borrows(db)]
     #[covariant]
     watermark_cf: Arc<rocksdb::BoundColumnFamily<'this>>,
+
+    /// ColumnFamily in `db` that restoration progress is written to.
+    #[borrows(db)]
+    #[covariant]
+    restore_cf: Arc<rocksdb::BoundColumnFamily<'this>>,
 
     /// Snapshots from `db`, ordered by checkpoint sequence number, along with their watermarks.
     #[borrows()]
@@ -120,6 +137,7 @@ impl Db {
         // Add a column family for watermarks, which are managed by the database.
         let mut cfs: Vec<_> = cfs.into_iter().collect();
         cfs.push((WATERMARK_CF, rocksdb::Options::default()));
+        cfs.push((RESTORE_CF, rocksdb::Options::default()));
         options.create_missing_column_families(true);
 
         let db = rocksdb::DB::open_cf_with_opts(&options, path, cfs)?;
@@ -127,6 +145,7 @@ impl Db {
             capacity,
             db,
             |db| db.cf_handle(WATERMARK_CF).context("WATERMARK_CF not found"),
+            |db| db.cf_handle(RESTORE_CF).context("RESTORE_CF not found"),
             BTreeMap::new(),
         )?;
 
@@ -147,6 +166,109 @@ impl Db {
         batch.put_cf(i.borrow_watermark_cf(), pipeline.as_bytes(), checkpoint);
         i.borrow_db().write(batch)?;
         Ok(())
+    }
+
+    /// Try to start restoration for a given `pipeline` at a given `watermark`. This operation will
+    /// fail if a restoration is already in-progress for that pipeline at a different watermark, or
+    /// if there is already a commit watermark for the pipeline (meaning restoration has completed
+    /// and/or indexing has started).
+    pub(crate) fn restore_at(&self, pipeline: &str, watermark: Watermark) -> Result<(), Error> {
+        self.0.read().expect("poisoned").with(|f| {
+            let p = pipeline.as_bytes();
+
+            if f.db.get_pinned_cf(f.watermark_cf, p)?.is_some() {
+                return Err(Error::RestoreOverwrite);
+            }
+
+            let Some(existing) = f.db.get_pinned_cf(f.restore_cf, p)? else {
+                f.db.put_cf(f.restore_cf, p, bcs::to_bytes(&watermark)?)?;
+                return Ok(());
+            };
+
+            let existing: Watermark = bcs::from_bytes(&existing)
+                .context("Failed to deserialize existing restore watermark")?;
+
+            if existing != watermark {
+                Err(Error::RestoreInProgress(existing.epoch_hi_inclusive))
+            } else {
+                Ok(())
+            }
+        })
+    }
+
+    /// Write a batch of updates to the database atomically, along with a record that this comes
+    /// from restoring objects from `bucket` and `partition` into `pipeline`.
+    pub(crate) fn restore(
+        &self,
+        bucket: u32,
+        partition: u32,
+        pipeline: &str,
+        mut batch: rocksdb::WriteBatch,
+    ) -> Result<(), Error> {
+        let key = key::encode(&Restored {
+            pipeline,
+            bucket,
+            partition,
+        });
+
+        let i = self.0.read().expect("poisoned");
+        batch.put_cf(i.borrow_restore_cf(), key, &[]);
+        i.borrow_db().write(batch)?;
+        Ok(())
+    }
+
+    /// Given a sequence of pipelines, return a vector indicating which of them have already
+    /// restored `bucket` and `partition`.
+    pub(crate) fn is_restored<'p>(
+        &self,
+        bucket: u32,
+        partition: u32,
+        pipelines: impl IntoIterator<Item = &'p str>,
+    ) -> Result<Vec<bool>, Error> {
+        self.0.read().expect("poisoned").with(|f| {
+            let keys: Vec<_> = pipelines
+                .into_iter()
+                .map(|pipeline| {
+                    key::encode(&Restored {
+                        pipeline,
+                        bucket,
+                        partition,
+                    })
+                })
+                .collect();
+
+            let sorted_input = false;
+            f.db.batched_multi_get_cf(f.restore_cf, &keys, sorted_input)
+                .into_iter()
+                .map(|res| match res {
+                    Ok(val) => Ok(val.is_some()),
+                    Err(e) => Err(Error::Storage(e)),
+                })
+                .collect()
+        })
+    }
+
+    /// Record the restoration of `pipeline` as completed by setting its watermark and removing its
+    /// restoration state.
+    pub(crate) fn commit_restore(&self, pipeline: &str) -> Result<(), Error> {
+        self.0.read().expect("poisoned").with(|f| {
+            let p = pipeline.as_bytes();
+
+            // Compute the key after `p` to use as the end of the delete range. If the key is
+            // somehow the maximum possible key, use an empty slice instead.
+            let mut q = p.to_owned();
+            let q = if key::next(&mut q) { &q } else { &[0u8; 0][..] };
+
+            let Some(existing) = f.db.get_cf(f.restore_cf, p)? else {
+                return Ok(());
+            };
+
+            let mut batch = rocksdb::WriteBatch::default();
+            batch.put_cf(f.watermark_cf, p, &existing);
+            batch.delete_range_cf(f.restore_cf, p, q);
+
+            Ok(f.db.write(batch)?)
+        })
     }
 
     /// Register a new snapshot at the checkpoint specified in the watermark. This could result in
@@ -1300,5 +1422,76 @@ pub(crate) mod tests {
         let mut iter: iter::RevIter<u64, u64> = db.iter_rev(0, &cf, 3u64..7).unwrap();
         iter.seek(key::encode(&1u64));
         assert!(iter.next().is_none(), "overflow");
+    }
+
+    #[test]
+    fn test_start_restoration() {
+        let d = tempfile::tempdir().unwrap();
+
+        {
+            let db = Db::open(d.path().join("db"), opts(), 4, cfs()).unwrap();
+            db.restore_at("p0", wm(10)).unwrap();
+        }
+
+        {
+            // Restoration is idempotent.
+            let db = Db::open(d.path().join("db"), opts(), 4, cfs()).unwrap();
+            db.restore_at("p0", wm(10)).unwrap();
+        }
+
+        {
+            // Cannot start restoration at a new watermark while one is in progress.
+            let db = Db::open(d.path().join("db"), opts(), 4, cfs()).unwrap();
+            let err = db.restore_at("p0", wm(20)).unwrap_err();
+            assert!(
+                matches!(err, Error::RestoreInProgress(_)),
+                "Unexpected error: {err:?}"
+            );
+        }
+
+        {
+            // Different pipelines may be restored at different watermarks.
+            let db = Db::open(d.path().join("db"), opts(), 4, cfs()).unwrap();
+            db.restore_at("p1", wm(20)).unwrap();
+        }
+    }
+
+    #[test]
+    fn test_is_restored() {
+        let d = tempfile::tempdir().unwrap();
+        let db = Db::open(d.path().join("db"), opts(), 4, cfs()).unwrap();
+
+        // Start restoration for two pipelines
+        db.restore_at("p0", wm(10)).unwrap();
+        db.restore_at("p1", wm(10)).unwrap();
+
+        // Both should require restoration for (0, 0), and (1, 1)
+        let r = db.is_restored(0, 0, ["p0", "p1"]).unwrap();
+        assert_eq!(r, vec![false, false]);
+
+        let r = db.is_restored(1, 1, ["p0", "p1"]).unwrap();
+        assert_eq!(r, vec![false, false]);
+
+        // Write to one of the pipelines for (0, 0)
+        let batch = rocksdb::WriteBatch::default();
+        db.restore(0, 0, "p0", batch).unwrap();
+
+        // p0 has restored (0, 0), p1 has not. (1, 1) is empty for both.
+        let r = db.is_restored(0, 0, ["p0", "p1"]).unwrap();
+        assert_eq!(r, vec![true, false]);
+
+        let r = db.is_restored(1, 1, ["p0", "p1"]).unwrap();
+        assert_eq!(r, vec![false, false]);
+
+        // Write to the other pipeline for (0, 0)
+        let batch = rocksdb::WriteBatch::default();
+        db.restore(0, 0, "p1", batch).unwrap();
+
+        // (0, 0) is fully restored, and (1, 1) is not.
+        let result = db.is_restored(0, 0, ["p0", "p1"]).unwrap();
+        assert_eq!(result, vec![true, true]);
+
+        let result = db.is_restored(1, 1, ["p0", "p1"]).unwrap();
+        assert_eq!(result, vec![false, false]);
     }
 }
