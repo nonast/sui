@@ -47,7 +47,9 @@ pub trait Processor {
 /// The task will shutdown if the `cancel` token is cancelled, or if any of the workers encounters
 /// an error -- there is no retry logic at this level.
 ///
-/// TODO (wlmyng) doc comments about special processing needed for tasked pipelines
+/// When `main_reader_lo` is present, the processor for the tasked pipeline will skip checkpoints
+/// that are below the main pipeline's reader watermark, to avoid writing data that has already been
+/// considered pruned by the main pipeline.
 pub(super) fn processor<P: Processor + Send + Sync + 'static>(
     processor: Arc<P>,
     rx: mpsc::Receiver<Arc<CheckpointData>>,
