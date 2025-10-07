@@ -233,6 +233,7 @@ pub(crate) fn pipeline<H: Handler + Send + Sync + 'static>(
         None
     };
 
+    // Any checkpoints below this watermark will not be passed to the tasked pipeline.
     let main_reader_lo_task = main_reader_lo_task::<H>(
         task.clone(),
         main_reader_lo.clone(),
@@ -278,8 +279,8 @@ pub(crate) fn pipeline<H: Handler + Send + Sync + 'static>(
         main_reader_lo,
     );
 
-    // task pipelines will skip reader_watermark and pruner. Setting the pruner config to None will
-    // result in the tasks returning early.
+    // Tasked pipelines will skip reader_watermark and pruner. Setting the pruner config to None
+    // will result in the tasks returning early.
     let pruner_config = if task.is_some() { None } else { pruner_config };
 
     let reader_watermark = reader_watermark::<H>(
@@ -319,8 +320,7 @@ const fn max_chunk_rows<H: Handler>() -> usize {
     }
 }
 
-/// Starts a task for tasked pipelines to track the main reader lo. Any checkpoints below this
-/// watermark will not be passed to the tasked pipeline.
+/// Starts a task for tasked pipelines to track the main reader lo.
 pub(super) fn main_reader_lo_task<H: Handler + 'static>(
     task: Option<String>,
     main_reader_lo: Option<Arc<AtomicU64>>,
