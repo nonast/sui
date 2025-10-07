@@ -51,7 +51,7 @@ impl RemoteIngestionClient {
         // SAFETY: The path being joined is statically known to be valid.
         let url = self
             .url
-            .join(&format!("/epochs.json"))
+            .join("/epochs.json")
             .expect("Unexpected invalid URL");
 
         self.client.get(url).send().await
