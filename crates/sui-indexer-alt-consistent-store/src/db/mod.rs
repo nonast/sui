@@ -212,7 +212,7 @@ impl Db {
         });
 
         let i = self.0.read().expect("poisoned");
-        batch.put_cf(i.borrow_restore_cf(), key, &[]);
+        batch.put_cf(i.borrow_restore_cf(), key, []);
         i.borrow_db().write(batch)?;
         Ok(())
     }

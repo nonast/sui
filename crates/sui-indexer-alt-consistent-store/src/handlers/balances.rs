@@ -79,7 +79,7 @@ impl Restore<Schema> for Balances {
                     owner: d.owner,
                     type_: d.type_,
                 },
-                &d.delta,
+                d.delta,
                 batch,
             )?;
         }

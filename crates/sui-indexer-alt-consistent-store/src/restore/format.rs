@@ -165,7 +165,7 @@ impl LiveObjects {
         );
 
         let mut objects = vec![];
-        while let Some(len) = read.read_varint::<u64>().ok() {
+        while let Ok(len) = read.read_varint::<u64>() {
             if len == 0 {
                 break;
             }

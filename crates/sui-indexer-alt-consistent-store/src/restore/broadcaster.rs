@@ -64,7 +64,7 @@ pub(super) fn broadcaster(
 
         let metadata: Vec<_> = manifest
             .metadata()
-            .into_iter()
+            .iter()
             .filter(|m| matches!(m.file_type, FileType::Object))
             .cloned()
             .collect();
@@ -117,11 +117,11 @@ pub(super) fn broadcaster(
                     };
 
                     // Send it to all subscribers who are not restored yet.
-                    let futures = subscribers.iter().zip(restored).filter_map(
-                        |((_, subscriber), restored)| {
-                            (!restored).then(|| subscriber.send(objects.clone()))
-                        },
-                    );
+                    let futures = subscribers
+                        .iter()
+                        .zip(restored)
+                        .filter(|(_, restored)| !*restored)
+                        .map(|((_, s), _)| s.send(objects.clone()));
 
                     if try_join_all(futures).await.is_err() {
                         info!("Subscription dropped, signalling shutdown");
