@@ -323,7 +323,7 @@ mod tests {
 
     #[test]
     fn test_event() {
-        let result = test_collect_pipelines("Event", None, BTreeSet::new());
+        let result = test_collect_pipelines("Event", Some("transaction"), BTreeSet::new());
         assert!(result.contains("ev_struct_inst"));
         assert!(result.contains("tx_digests"));
     }
