@@ -924,4 +924,12 @@ mod tests {
             6
         );
     }
+
+    // async fn test_tasked_pipelines_resume_from_main_reader_lo() {
+
+    // }
+
+    // test_tasked_pipelines_can_run_ahead_of_main_committer_hi
+
+    // test_tasked_pipelines_stop_when_trailing_main_reader_lo
 }
